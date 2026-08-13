@@ -1,5 +1,7 @@
 #include <Arduino.h>
 #include <Wire.h>
+#include <math.h>
+
 #include "DHTesp.h"
 #include <Adafruit_BMP085.h>
 #include <Adafruit_GFX.h>
@@ -53,7 +55,13 @@ uint16_t pm1 = 0;
 uint16_t pm25 = 0;
 uint16_t pm10 = 0;
 
-bool pmsDataValid = false;
+// =====================================================
+// Sensor health
+// =====================================================
+
+bool dhtHealthy = false;
+bool bmpHealthy = false;
+bool pmsHealthy = false;
 
 // =====================================================
 // PMS5003 parser
@@ -62,24 +70,26 @@ bool pmsDataValid = false;
 uint8_t pmsFrame[32];
 uint8_t pmsIndex = 0;
 
+unsigned long lastPMSPacketTime = 0;
+
+// If no valid PMS packet arrives for 3 seconds,
+// consider the sensor offline.
+const unsigned long PMS_TIMEOUT = 3000;
+
 // =====================================================
 // Timing
 // =====================================================
 
-// Environmental sensor update
 unsigned long lastEnvironmentUpdate = 0;
 const unsigned long ENVIRONMENT_INTERVAL = 2000;
 
-// OLED screen switching
 unsigned long lastDisplaySwitch = 0;
 const unsigned long DISPLAY_INTERVAL = 3000;
 
-// false = environmental screen
-// true  = air-quality screen
 bool showAirQualityScreen = false;
 
 // =====================================================
-// Read PMS5003 UART data
+// PMS5003 parser
 // =====================================================
 
 void readPMS5003() {
@@ -89,7 +99,7 @@ void readPMS5003() {
     uint8_t incomingByte = Serial2.read();
 
     // -------------------------------------------------
-    // Look for first header byte: 0x42
+    // First PMS5003 header byte
     // -------------------------------------------------
 
     if (pmsIndex == 0) {
@@ -102,7 +112,7 @@ void readPMS5003() {
     }
 
     // -------------------------------------------------
-    // Look for second header byte: 0x4D
+    // Second PMS5003 header byte
     // -------------------------------------------------
 
     if (pmsIndex == 1) {
@@ -117,14 +127,10 @@ void readPMS5003() {
     }
 
     // -------------------------------------------------
-    // Store remaining frame bytes
+    // Store packet bytes
     // -------------------------------------------------
 
     pmsFrame[pmsIndex++] = incomingByte;
-
-    // -------------------------------------------------
-    // Full PMS5003 frame received
-    // -------------------------------------------------
 
     if (pmsIndex == 32) {
 
@@ -138,28 +144,26 @@ void readPMS5003() {
         ((uint16_t)pmsFrame[30] << 8) |
         pmsFrame[31];
 
-      // -----------------------------------------------
-      // Validate checksum
-      // -----------------------------------------------
+      // -------------------------------------------------
+      // Valid packet
+      // -------------------------------------------------
 
       if (calculatedChecksum == receivedChecksum) {
 
-        // Atmospheric PM1.0
         pm1 =
           ((uint16_t)pmsFrame[10] << 8) |
           pmsFrame[11];
 
-        // Atmospheric PM2.5
         pm25 =
           ((uint16_t)pmsFrame[12] << 8) |
           pmsFrame[13];
 
-        // Atmospheric PM10
         pm10 =
           ((uint16_t)pmsFrame[14] << 8) |
           pmsFrame[15];
 
-        pmsDataValid = true;
+        pmsHealthy = true;
+        lastPMSPacketTime = millis();
 
         Serial.println();
         Serial.println("----- PARTICULATE DATA -----");
@@ -176,8 +180,14 @@ void readPMS5003() {
         Serial.print(pm10);
         Serial.println(" ug/m3");
 
+        Serial.println("PMS5003 Status: OK");
+
         Serial.println("----------------------------");
       }
+
+      // -------------------------------------------------
+      // Invalid checksum
+      // -------------------------------------------------
 
       else {
 
@@ -185,48 +195,133 @@ void readPMS5003() {
         Serial.println(
           "ERROR: PMS5003 checksum failed"
         );
-
-        pmsDataValid = false;
       }
 
-      // Prepare for next packet
       pmsIndex = 0;
     }
   }
 }
 
 // =====================================================
-// Read environmental sensors
+// PMS5003 timeout check
+// =====================================================
+
+void checkPMSHealth() {
+
+  unsigned long currentTime = millis();
+
+  if (
+    pmsHealthy &&
+    currentTime - lastPMSPacketTime > PMS_TIMEOUT
+  ) {
+
+    pmsHealthy = false;
+
+    Serial.println();
+    Serial.println(
+      "WARNING: PMS5003 communication timeout"
+    );
+  }
+}
+
+// =====================================================
+// Environmental sensors
 // =====================================================
 
 void updateEnvironment() {
 
+  // ---------------------------------------------------
+  // DHT22
+  // ---------------------------------------------------
+
   TempAndHumidity dhtData =
     dhtSensor.getTempAndHumidity();
 
-  temperature = dhtData.temperature;
-  humidity = dhtData.humidity;
+  if (
+    !isnan(dhtData.temperature) &&
+    !isnan(dhtData.humidity)
+  ) {
+
+    temperature = dhtData.temperature;
+    humidity = dhtData.humidity;
+
+    dhtHealthy = true;
+
+  } else {
+
+    dhtHealthy = false;
+  }
+
+  // ---------------------------------------------------
+  // BMP180
+  // ---------------------------------------------------
 
   int32_t pressurePa =
     bmp.readPressure();
 
-  pressureHPa =
+  float newPressureHPa =
     pressurePa / 100.0f;
+
+  // Basic plausibility range for atmospheric pressure.
+  if (
+    newPressureHPa >= 300.0 &&
+    newPressureHPa <= 1100.0
+  ) {
+
+    pressureHPa = newPressureHPa;
+    bmpHealthy = true;
+
+  } else {
+
+    bmpHealthy = false;
+  }
+
+  // ---------------------------------------------------
+  // Serial output
+  // ---------------------------------------------------
 
   Serial.println();
   Serial.println("----- ENVIRONMENT -----");
 
-  Serial.print("Temperature: ");
-  Serial.print(temperature, 1);
-  Serial.println(" C");
+  if (dhtHealthy) {
 
-  Serial.print("Humidity: ");
-  Serial.print(humidity, 1);
-  Serial.println(" %");
+    Serial.print("Temperature: ");
+    Serial.print(temperature, 1);
+    Serial.println(" C");
 
-  Serial.print("Pressure: ");
-  Serial.print(pressureHPa, 1);
-  Serial.println(" hPa");
+    Serial.print("Humidity: ");
+    Serial.print(humidity, 1);
+    Serial.println(" %");
+
+  } else {
+
+    Serial.println(
+      "DHT22 Status: ERROR"
+    );
+  }
+
+  if (bmpHealthy) {
+
+    Serial.print("Pressure: ");
+    Serial.print(pressureHPa, 1);
+    Serial.println(" hPa");
+
+  } else {
+
+    Serial.println(
+      "BMP180 Status: ERROR"
+    );
+  }
+
+  Serial.print("DHT22 Status: ");
+  Serial.println(
+    dhtHealthy ? "OK" : "ERROR"
+  );
+
+  Serial.print("BMP180 Status: ");
+  Serial.println(
+    bmpHealthy ? "OK" : "ERROR"
+  );
 
   Serial.println("-----------------------");
 }
@@ -247,17 +342,32 @@ void displayEnvironmentScreen() {
   display.println("ENVIRONMENT");
   display.println("----------------");
 
-  display.print("Temp: ");
-  display.print(temperature, 1);
-  display.println(" C");
+  if (dhtHealthy) {
 
-  display.print("Hum:  ");
-  display.print(humidity, 1);
-  display.println(" %");
+    display.print("Temp: ");
+    display.print(temperature, 1);
+    display.println(" C");
 
-  display.print("Pres: ");
-  display.print(pressureHPa, 1);
-  display.println(" hPa");
+    display.print("Hum:  ");
+    display.print(humidity, 1);
+    display.println(" %");
+
+  } else {
+
+    display.println("Temp: ERROR");
+    display.println("Hum:  ERROR");
+  }
+
+  if (bmpHealthy) {
+
+    display.print("Pres: ");
+    display.print(pressureHPa, 1);
+    display.println(" hPa");
+
+  } else {
+
+    display.println("Pres: ERROR");
+  }
 
   display.display();
 }
@@ -278,16 +388,7 @@ void displayAirQualityScreen() {
   display.println("AIR QUALITY");
   display.println("----------------");
 
-  // If we haven't received a valid PMS packet yet
-  if (!pmsDataValid) {
-
-    display.println();
-    display.println("Waiting for");
-    display.println("PMS5003 data...");
-
-  }
-
-  else {
+  if (pmsHealthy) {
 
     display.print("PM1.0: ");
     display.print(pm1);
@@ -300,13 +401,19 @@ void displayAirQualityScreen() {
     display.print("PM10:  ");
     display.print(pm10);
     display.println(" ug/m3");
+
+  } else {
+
+    display.println();
+    display.println("PMS5003 OFFLINE");
+    display.println("Waiting for data...");
   }
 
   display.display();
 }
 
 // =====================================================
-// Update whichever OLED screen is active
+// Display manager
 // =====================================================
 
 void updateDisplay() {
@@ -357,20 +464,22 @@ void setup() {
   // BMP180
   // ---------------------------------------------------
 
-  if (!bmp.begin()) {
+  if (bmp.begin()) {
+
+    bmpHealthy = true;
+
+    Serial.println(
+      "BMP180 initialized."
+    );
+
+  } else {
+
+    bmpHealthy = false;
 
     Serial.println(
       "ERROR: BMP180 not detected!"
     );
-
-    while (true) {
-      delay(1000);
-    }
   }
-
-  Serial.println(
-    "BMP180 initialized."
-  );
 
   // ---------------------------------------------------
   // OLED
@@ -410,7 +519,7 @@ void setup() {
   );
 
   // ---------------------------------------------------
-  // Startup OLED screen
+  // Startup screen
   // ---------------------------------------------------
 
   display.clearDisplay();
@@ -429,17 +538,21 @@ void setup() {
 
   delay(1000);
 
-  // Get initial environmental readings immediately
+  // ---------------------------------------------------
+  // Initial sensor update
+  // ---------------------------------------------------
+
   updateEnvironment();
 
-  // Start with environmental screen
   showAirQualityScreen = false;
 
   updateDisplay();
 
-  // Start timers from current time
-  lastEnvironmentUpdate = millis();
-  lastDisplaySwitch = millis();
+  lastEnvironmentUpdate =
+    millis();
+
+  lastDisplaySwitch =
+    millis();
 
   Serial.println();
   Serial.println("System ready.");
@@ -451,16 +564,17 @@ void setup() {
 
 void loop() {
 
-  // ---------------------------------------------------
-  // Always listen for PMS5003 data
-  // ---------------------------------------------------
-
+  // Always process incoming UART bytes
   readPMS5003();
 
-  unsigned long currentTime = millis();
+  // Continuously check for PMS timeout
+  checkPMSHealth();
+
+  unsigned long currentTime =
+    millis();
 
   // ---------------------------------------------------
-  // Environmental sensor update every 2 seconds
+  // Update environmental sensors
   // ---------------------------------------------------
 
   if (
@@ -468,16 +582,16 @@ void loop() {
     ENVIRONMENT_INTERVAL
   ) {
 
-    lastEnvironmentUpdate = currentTime;
+    lastEnvironmentUpdate =
+      currentTime;
 
     updateEnvironment();
 
-    // Refresh the display with newest values
     updateDisplay();
   }
 
   // ---------------------------------------------------
-  // Switch OLED screen every 3 seconds
+  // Alternate OLED screens
   // ---------------------------------------------------
 
   if (
@@ -485,9 +599,9 @@ void loop() {
     DISPLAY_INTERVAL
   ) {
 
-    lastDisplaySwitch = currentTime;
+    lastDisplaySwitch =
+      currentTime;
 
-    // Toggle screen
     showAirQualityScreen =
       !showAirQualityScreen;
 

@@ -2,6 +2,9 @@
 #include <Wire.h>
 #include <math.h>
 
+#include <WiFi.h>
+#include <WebServer.h>
+
 #include "DHTesp.h"
 #include <Adafruit_BMP085.h>
 #include <Adafruit_GFX.h>
@@ -26,6 +29,17 @@ const int OLED_RESET = -1;
 const int OLED_ADDRESS = 0x3C;
 
 // =====================================================
+// WiFi configuration
+// =====================================================
+
+const char *WIFI_SSID = "Wokwi-GUEST";
+const char *WIFI_PASSWORD = "";
+
+// Wokwi-GUEST uses channel 6.
+// Specifying it avoids the WiFi scan delay.
+const int WIFI_CHANNEL = 6;
+
+// =====================================================
 // Sensor objects
 // =====================================================
 
@@ -38,6 +52,14 @@ Adafruit_SSD1306 display(
   &Wire,
   OLED_RESET
 );
+
+// =====================================================
+// HTTP server
+// =====================================================
+
+WebServer server(80);
+
+bool wifiHealthy = false;
 
 // =====================================================
 // Environmental measurements
@@ -72,8 +94,6 @@ uint8_t pmsIndex = 0;
 
 unsigned long lastPMSPacketTime = 0;
 
-// If no valid PMS packet arrives for 3 seconds,
-// consider the sensor offline.
 const unsigned long PMS_TIMEOUT = 3000;
 
 // =====================================================
@@ -89,37 +109,326 @@ const unsigned long DISPLAY_INTERVAL = 3000;
 bool showAirQualityScreen = false;
 
 // =====================================================
-// PMS5003 parser
+// Create JSON response
+// =====================================================
+
+String createSensorJSON() {
+
+  String json = "{";
+
+  // ---------------------------------------------------
+  // Environmental readings
+  // ---------------------------------------------------
+
+  json += "\"temperature_c\":";
+
+  if (dhtHealthy) {
+    json += String(temperature, 1);
+  } else {
+    json += "null";
+  }
+
+  json += ",";
+
+  json += "\"humidity_percent\":";
+
+  if (dhtHealthy) {
+    json += String(humidity, 1);
+  } else {
+    json += "null";
+  }
+
+  json += ",";
+
+  json += "\"pressure_hpa\":";
+
+  if (bmpHealthy) {
+    json += String(pressureHPa, 1);
+  } else {
+    json += "null";
+  }
+
+  json += ",";
+
+  // ---------------------------------------------------
+  // Particulate readings
+  // ---------------------------------------------------
+
+  json += "\"pm1_ug_m3\":";
+
+  if (pmsHealthy) {
+    json += String(pm1);
+  } else {
+    json += "null";
+  }
+
+  json += ",";
+
+  json += "\"pm25_ug_m3\":";
+
+  if (pmsHealthy) {
+    json += String(pm25);
+  } else {
+    json += "null";
+  }
+
+  json += ",";
+
+  json += "\"pm10_ug_m3\":";
+
+  if (pmsHealthy) {
+    json += String(pm10);
+  } else {
+    json += "null";
+  }
+
+  json += ",";
+
+  // ---------------------------------------------------
+  // Sensor-health information
+  // ---------------------------------------------------
+
+  json += "\"status\":{";
+
+  json += "\"dht22\":";
+  json += dhtHealthy ? "true" : "false";
+
+  json += ",";
+
+  json += "\"bmp180\":";
+  json += bmpHealthy ? "true" : "false";
+
+  json += ",";
+
+  json += "\"pms5003\":";
+  json += pmsHealthy ? "true" : "false";
+
+  json += ",";
+
+  json += "\"wifi\":";
+  json += wifiHealthy ? "true" : "false";
+
+  json += "}";
+
+  json += "}";
+
+  return json;
+}
+
+// =====================================================
+// HTTP root endpoint
+// =====================================================
+
+void handleRoot() {
+
+  String response =
+    "ESP32 Air Quality Monitor\n\n"
+    "JSON API:\n"
+    "/api/readings\n";
+
+  server.send(
+    200,
+    "text/plain",
+    response
+  );
+}
+
+// =====================================================
+// JSON API endpoint
+// =====================================================
+
+void handleReadings() {
+
+  String json =
+    createSensorJSON();
+
+  // This will also help when we build the dashboard.
+  server.sendHeader(
+    "Access-Control-Allow-Origin",
+    "*"
+  );
+
+  server.send(
+    200,
+    "application/json",
+    json
+  );
+}
+
+// =====================================================
+// 404 response
+// =====================================================
+
+void handleNotFound() {
+
+  String response =
+    "404 - Endpoint not found\n";
+
+  server.send(
+    404,
+    "text/plain",
+    response
+  );
+}
+
+// =====================================================
+// Connect to WiFi
+// =====================================================
+
+void setupWiFi() {
+
+  Serial.println();
+  Serial.print(
+    "Connecting to WiFi: "
+  );
+
+  Serial.println(
+    WIFI_SSID
+  );
+
+  WiFi.mode(
+    WIFI_STA
+  );
+
+  WiFi.begin(
+    WIFI_SSID,
+    WIFI_PASSWORD,
+    WIFI_CHANNEL
+  );
+
+  unsigned long startTime =
+    millis();
+
+  // Give WiFi up to 10 seconds.
+  // Do not permanently freeze the monitoring system
+  // if networking fails.
+  while (
+    WiFi.status() != WL_CONNECTED &&
+    millis() - startTime < 10000
+  ) {
+
+    delay(100);
+
+    Serial.print(".");
+  }
+
+  Serial.println();
+
+  if (
+    WiFi.status() == WL_CONNECTED
+  ) {
+
+    wifiHealthy = true;
+
+    Serial.println(
+      "WiFi connected."
+    );
+
+    Serial.print(
+      "ESP32 IP address: "
+    );
+
+    Serial.println(
+      WiFi.localIP()
+    );
+
+  } else {
+
+    wifiHealthy = false;
+
+    Serial.println(
+      "WARNING: WiFi connection failed."
+    );
+  }
+}
+
+// =====================================================
+// Configure HTTP API
+// =====================================================
+
+void setupWebServer() {
+
+  if (!wifiHealthy) {
+
+    Serial.println(
+      "HTTP server not started: WiFi unavailable."
+    );
+
+    return;
+  }
+
+  server.on(
+    "/",
+    HTTP_GET,
+    handleRoot
+  );
+
+  server.on(
+    "/api/readings",
+    HTTP_GET,
+    handleReadings
+  );
+
+  server.onNotFound(
+    handleNotFound
+  );
+
+  server.begin();
+
+  Serial.println(
+    "HTTP server started."
+  );
+
+  Serial.println(
+    "API endpoint: /api/readings"
+  );
+}
+
+// =====================================================
+// Read PMS5003 UART data
 // =====================================================
 
 void readPMS5003() {
 
-  while (Serial2.available() > 0) {
+  while (
+    Serial2.available() > 0
+  ) {
 
-    uint8_t incomingByte = Serial2.read();
+    uint8_t incomingByte =
+      Serial2.read();
 
     // -------------------------------------------------
-    // First PMS5003 header byte
+    // First header byte
     // -------------------------------------------------
 
     if (pmsIndex == 0) {
 
-      if (incomingByte == 0x42) {
-        pmsFrame[pmsIndex++] = incomingByte;
+      if (
+        incomingByte == 0x42
+      ) {
+
+        pmsFrame[pmsIndex++] =
+          incomingByte;
       }
 
       continue;
     }
 
     // -------------------------------------------------
-    // Second PMS5003 header byte
+    // Second header byte
     // -------------------------------------------------
 
     if (pmsIndex == 1) {
 
-      if (incomingByte == 0x4D) {
-        pmsFrame[pmsIndex++] = incomingByte;
+      if (
+        incomingByte == 0x4D
+      ) {
+
+        pmsFrame[pmsIndex++] =
+          incomingByte;
+
       } else {
+
         pmsIndex = 0;
       }
 
@@ -127,28 +436,45 @@ void readPMS5003() {
     }
 
     // -------------------------------------------------
-    // Store packet bytes
+    // Store remaining packet bytes
     // -------------------------------------------------
 
-    pmsFrame[pmsIndex++] = incomingByte;
+    pmsFrame[pmsIndex++] =
+      incomingByte;
 
-    if (pmsIndex == 32) {
+    // -------------------------------------------------
+    // Full packet received
+    // -------------------------------------------------
 
-      uint16_t calculatedChecksum = 0;
+    if (
+      pmsIndex == 32
+    ) {
 
-      for (int i = 0; i < 30; i++) {
-        calculatedChecksum += pmsFrame[i];
+      uint16_t calculatedChecksum =
+        0;
+
+      for (
+        int i = 0;
+        i < 30;
+        i++
+      ) {
+
+        calculatedChecksum +=
+          pmsFrame[i];
       }
 
       uint16_t receivedChecksum =
         ((uint16_t)pmsFrame[30] << 8) |
         pmsFrame[31];
 
-      // -------------------------------------------------
+      // -----------------------------------------------
       // Valid packet
-      // -------------------------------------------------
+      // -----------------------------------------------
 
-      if (calculatedChecksum == receivedChecksum) {
+      if (
+        calculatedChecksum ==
+        receivedChecksum
+      ) {
 
         pm1 =
           ((uint16_t)pmsFrame[10] << 8) |
@@ -163,33 +489,54 @@ void readPMS5003() {
           pmsFrame[15];
 
         pmsHealthy = true;
-        lastPMSPacketTime = millis();
+
+        lastPMSPacketTime =
+          millis();
 
         Serial.println();
-        Serial.println("----- PARTICULATE DATA -----");
+        Serial.println(
+          "----- PARTICULATE DATA -----"
+        );
 
-        Serial.print("PM1.0: ");
+        Serial.print(
+          "PM1.0: "
+        );
+
         Serial.print(pm1);
-        Serial.println(" ug/m3");
 
-        Serial.print("PM2.5: ");
+        Serial.println(
+          " ug/m3"
+        );
+
+        Serial.print(
+          "PM2.5: "
+        );
+
         Serial.print(pm25);
-        Serial.println(" ug/m3");
 
-        Serial.print("PM10:  ");
+        Serial.println(
+          " ug/m3"
+        );
+
+        Serial.print(
+          "PM10:  "
+        );
+
         Serial.print(pm10);
-        Serial.println(" ug/m3");
 
-        Serial.println("PMS5003 Status: OK");
+        Serial.println(
+          " ug/m3"
+        );
 
-        Serial.println("----------------------------");
-      }
+        Serial.println(
+          "PMS5003 Status: OK"
+        );
 
-      // -------------------------------------------------
-      // Invalid checksum
-      // -------------------------------------------------
+        Serial.println(
+          "----------------------------"
+        );
 
-      else {
+      } else {
 
         Serial.println();
         Serial.println(
@@ -203,16 +550,18 @@ void readPMS5003() {
 }
 
 // =====================================================
-// PMS5003 timeout check
+// Check PMS5003 timeout
 // =====================================================
 
 void checkPMSHealth() {
 
-  unsigned long currentTime = millis();
+  unsigned long currentTime =
+    millis();
 
   if (
     pmsHealthy &&
-    currentTime - lastPMSPacketTime > PMS_TIMEOUT
+    currentTime - lastPMSPacketTime >
+      PMS_TIMEOUT
   ) {
 
     pmsHealthy = false;
@@ -225,7 +574,7 @@ void checkPMSHealth() {
 }
 
 // =====================================================
-// Environmental sensors
+// Read DHT22 and BMP180
 // =====================================================
 
 void updateEnvironment() {
@@ -242,8 +591,11 @@ void updateEnvironment() {
     !isnan(dhtData.humidity)
   ) {
 
-    temperature = dhtData.temperature;
-    humidity = dhtData.humidity;
+    temperature =
+      dhtData.temperature;
+
+    humidity =
+      dhtData.humidity;
 
     dhtHealthy = true;
 
@@ -262,13 +614,14 @@ void updateEnvironment() {
   float newPressureHPa =
     pressurePa / 100.0f;
 
-  // Basic plausibility range for atmospheric pressure.
   if (
     newPressureHPa >= 300.0 &&
     newPressureHPa <= 1100.0
   ) {
 
-    pressureHPa = newPressureHPa;
+    pressureHPa =
+      newPressureHPa;
+
     bmpHealthy = true;
 
   } else {
@@ -281,17 +634,37 @@ void updateEnvironment() {
   // ---------------------------------------------------
 
   Serial.println();
-  Serial.println("----- ENVIRONMENT -----");
+  Serial.println(
+    "----- ENVIRONMENT -----"
+  );
 
   if (dhtHealthy) {
 
-    Serial.print("Temperature: ");
-    Serial.print(temperature, 1);
-    Serial.println(" C");
+    Serial.print(
+      "Temperature: "
+    );
 
-    Serial.print("Humidity: ");
-    Serial.print(humidity, 1);
-    Serial.println(" %");
+    Serial.print(
+      temperature,
+      1
+    );
+
+    Serial.println(
+      " C"
+    );
+
+    Serial.print(
+      "Humidity: "
+    );
+
+    Serial.print(
+      humidity,
+      1
+    );
+
+    Serial.println(
+      " %"
+    );
 
   } else {
 
@@ -302,9 +675,18 @@ void updateEnvironment() {
 
   if (bmpHealthy) {
 
-    Serial.print("Pressure: ");
-    Serial.print(pressureHPa, 1);
-    Serial.println(" hPa");
+    Serial.print(
+      "Pressure: "
+    );
+
+    Serial.print(
+      pressureHPa,
+      1
+    );
+
+    Serial.println(
+      " hPa"
+    );
 
   } else {
 
@@ -313,17 +695,29 @@ void updateEnvironment() {
     );
   }
 
-  Serial.print("DHT22 Status: ");
-  Serial.println(
-    dhtHealthy ? "OK" : "ERROR"
+  Serial.print(
+    "DHT22 Status: "
   );
 
-  Serial.print("BMP180 Status: ");
   Serial.println(
-    bmpHealthy ? "OK" : "ERROR"
+    dhtHealthy ?
+    "OK" :
+    "ERROR"
   );
 
-  Serial.println("-----------------------");
+  Serial.print(
+    "BMP180 Status: "
+  );
+
+  Serial.println(
+    bmpHealthy ?
+    "OK" :
+    "ERROR"
+  );
+
+  Serial.println(
+    "-----------------------"
+  );
 }
 
 // =====================================================
@@ -335,38 +729,83 @@ void displayEnvironmentScreen() {
   display.clearDisplay();
 
   display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
 
-  display.setCursor(0, 0);
+  display.setTextColor(
+    SSD1306_WHITE
+  );
 
-  display.println("ENVIRONMENT");
-  display.println("----------------");
+  display.setCursor(
+    0,
+    0
+  );
+
+  display.println(
+    "ENVIRONMENT"
+  );
+
+  display.println(
+    "----------------"
+  );
 
   if (dhtHealthy) {
 
-    display.print("Temp: ");
-    display.print(temperature, 1);
-    display.println(" C");
+    display.print(
+      "Temp: "
+    );
 
-    display.print("Hum:  ");
-    display.print(humidity, 1);
-    display.println(" %");
+    display.print(
+      temperature,
+      1
+    );
+
+    display.println(
+      " C"
+    );
+
+    display.print(
+      "Hum:  "
+    );
+
+    display.print(
+      humidity,
+      1
+    );
+
+    display.println(
+      " %"
+    );
 
   } else {
 
-    display.println("Temp: ERROR");
-    display.println("Hum:  ERROR");
+    display.println(
+      "Temp: ERROR"
+    );
+
+    display.println(
+      "Hum:  ERROR"
+    );
   }
 
   if (bmpHealthy) {
 
-    display.print("Pres: ");
-    display.print(pressureHPa, 1);
-    display.println(" hPa");
+    display.print(
+      "Pres: "
+    );
+
+    display.print(
+      pressureHPa,
+      1
+    );
+
+    display.println(
+      " hPa"
+    );
 
   } else {
 
-    display.println("Pres: ERROR");
+    display.println(
+      "Pres: ERROR"
+    );
   }
 
   display.display();
@@ -381,44 +820,81 @@ void displayAirQualityScreen() {
   display.clearDisplay();
 
   display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
 
-  display.setCursor(0, 0);
+  display.setTextColor(
+    SSD1306_WHITE
+  );
 
-  display.println("AIR QUALITY");
-  display.println("----------------");
+  display.setCursor(
+    0,
+    0
+  );
+
+  display.println(
+    "AIR QUALITY"
+  );
+
+  display.println(
+    "----------------"
+  );
 
   if (pmsHealthy) {
 
-    display.print("PM1.0: ");
+    display.print(
+      "PM1.0: "
+    );
+
     display.print(pm1);
-    display.println(" ug/m3");
 
-    display.print("PM2.5: ");
+    display.println(
+      " ug/m3"
+    );
+
+    display.print(
+      "PM2.5: "
+    );
+
     display.print(pm25);
-    display.println(" ug/m3");
 
-    display.print("PM10:  ");
+    display.println(
+      " ug/m3"
+    );
+
+    display.print(
+      "PM10:  "
+    );
+
     display.print(pm10);
-    display.println(" ug/m3");
+
+    display.println(
+      " ug/m3"
+    );
 
   } else {
 
     display.println();
-    display.println("PMS5003 OFFLINE");
-    display.println("Waiting for data...");
+
+    display.println(
+      "PMS5003 OFFLINE"
+    );
+
+    display.println(
+      "Waiting for data..."
+    );
   }
 
   display.display();
 }
 
 // =====================================================
-// Display manager
+// OLED display manager
 // =====================================================
 
 void updateDisplay() {
 
-  if (showAirQualityScreen) {
+  if (
+    showAirQualityScreen
+  ) {
 
     displayAirQualityScreen();
 
@@ -437,6 +913,7 @@ void setup() {
   Serial.begin(115200);
 
   Serial.println();
+
   Serial.println(
     "Air Quality Monitor starting..."
   );
@@ -458,13 +935,18 @@ void setup() {
   // I2C
   // ---------------------------------------------------
 
-  Wire.begin(21, 22);
+  Wire.begin(
+    21,
+    22
+  );
 
   // ---------------------------------------------------
   // BMP180
   // ---------------------------------------------------
 
-  if (bmp.begin()) {
+  if (
+    bmp.begin()
+  ) {
 
     bmpHealthy = true;
 
@@ -485,10 +967,12 @@ void setup() {
   // OLED
   // ---------------------------------------------------
 
-  if (!display.begin(
-        SSD1306_SWITCHCAPVCC,
-        OLED_ADDRESS
-      )) {
+  if (
+    !display.begin(
+      SSD1306_SWITCHCAPVCC,
+      OLED_ADDRESS
+    )
+  ) {
 
     Serial.println(
       "ERROR: OLED not detected!"
@@ -519,32 +1003,48 @@ void setup() {
   );
 
   // ---------------------------------------------------
-  // Startup screen
+  // Startup OLED
   // ---------------------------------------------------
 
   display.clearDisplay();
 
   display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
 
-  display.setCursor(0, 0);
+  display.setTextColor(
+    SSD1306_WHITE
+  );
 
-  display.println("AIR QUALITY");
-  display.println("MONITOR");
+  display.setCursor(
+    0,
+    0
+  );
+
+  display.println(
+    "AIR QUALITY"
+  );
+
+  display.println(
+    "MONITOR"
+  );
+
   display.println();
-  display.println("Starting...");
+
+  display.println(
+    "Starting..."
+  );
 
   display.display();
 
   delay(1000);
 
   // ---------------------------------------------------
-  // Initial sensor update
+  // Initial environmental readings
   // ---------------------------------------------------
 
   updateEnvironment();
 
-  showAirQualityScreen = false;
+  showAirQualityScreen =
+    false;
 
   updateDisplay();
 
@@ -554,8 +1054,19 @@ void setup() {
   lastDisplaySwitch =
     millis();
 
+  // ---------------------------------------------------
+  // WiFi + HTTP
+  // ---------------------------------------------------
+
+  setupWiFi();
+
+  setupWebServer();
+
   Serial.println();
-  Serial.println("System ready.");
+
+  Serial.println(
+    "System ready."
+  );
 }
 
 // =====================================================
@@ -564,21 +1075,33 @@ void setup() {
 
 void loop() {
 
-  // Always process incoming UART bytes
+  // ---------------------------------------------------
+  // Continuously service PMS5003
+  // ---------------------------------------------------
+
   readPMS5003();
 
-  // Continuously check for PMS timeout
   checkPMSHealth();
+
+  // ---------------------------------------------------
+  // Continuously service HTTP clients
+  // ---------------------------------------------------
+
+  if (wifiHealthy) {
+
+    server.handleClient();
+  }
 
   unsigned long currentTime =
     millis();
 
   // ---------------------------------------------------
-  // Update environmental sensors
+  // Environmental update
   // ---------------------------------------------------
 
   if (
-    currentTime - lastEnvironmentUpdate >=
+    currentTime -
+      lastEnvironmentUpdate >=
     ENVIRONMENT_INTERVAL
   ) {
 
@@ -591,11 +1114,12 @@ void loop() {
   }
 
   // ---------------------------------------------------
-  // Alternate OLED screens
+  // OLED page switching
   // ---------------------------------------------------
 
   if (
-    currentTime - lastDisplaySwitch >=
+    currentTime -
+      lastDisplaySwitch >=
     DISPLAY_INTERVAL
   ) {
 

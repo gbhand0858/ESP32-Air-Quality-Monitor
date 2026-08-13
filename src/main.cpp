@@ -10,6 +10,8 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
+#include "dashboard.h"
+
 // =====================================================
 // Pin configuration
 // =====================================================
@@ -35,8 +37,6 @@ const int OLED_ADDRESS = 0x3C;
 const char *WIFI_SSID = "Wokwi-GUEST";
 const char *WIFI_PASSWORD = "";
 
-// Wokwi-GUEST uses channel 6.
-// Specifying it avoids the WiFi scan delay.
 const int WIFI_CHANNEL = 6;
 
 // =====================================================
@@ -101,9 +101,11 @@ const unsigned long PMS_TIMEOUT = 3000;
 // =====================================================
 
 unsigned long lastEnvironmentUpdate = 0;
+
 const unsigned long ENVIRONMENT_INTERVAL = 2000;
 
 unsigned long lastDisplaySwitch = 0;
+
 const unsigned long DISPLAY_INTERVAL = 3000;
 
 bool showAirQualityScreen = false;
@@ -117,7 +119,7 @@ String createSensorJSON() {
   String json = "{";
 
   // ---------------------------------------------------
-  // Environmental readings
+  // Temperature
   // ---------------------------------------------------
 
   json += "\"temperature_c\":";
@@ -130,6 +132,10 @@ String createSensorJSON() {
 
   json += ",";
 
+  // ---------------------------------------------------
+  // Humidity
+  // ---------------------------------------------------
+
   json += "\"humidity_percent\":";
 
   if (dhtHealthy) {
@@ -139,6 +145,10 @@ String createSensorJSON() {
   }
 
   json += ",";
+
+  // ---------------------------------------------------
+  // Pressure
+  // ---------------------------------------------------
 
   json += "\"pressure_hpa\":";
 
@@ -151,7 +161,7 @@ String createSensorJSON() {
   json += ",";
 
   // ---------------------------------------------------
-  // Particulate readings
+  // PM1.0
   // ---------------------------------------------------
 
   json += "\"pm1_ug_m3\":";
@@ -164,6 +174,10 @@ String createSensorJSON() {
 
   json += ",";
 
+  // ---------------------------------------------------
+  // PM2.5
+  // ---------------------------------------------------
+
   json += "\"pm25_ug_m3\":";
 
   if (pmsHealthy) {
@@ -173,6 +187,10 @@ String createSensorJSON() {
   }
 
   json += ",";
+
+  // ---------------------------------------------------
+  // PM10
+  // ---------------------------------------------------
 
   json += "\"pm10_ug_m3\":";
 
@@ -185,7 +203,7 @@ String createSensorJSON() {
   json += ",";
 
   // ---------------------------------------------------
-  // Sensor-health information
+  // System health
   // ---------------------------------------------------
 
   json += "\"status\":{";
@@ -216,20 +234,20 @@ String createSensorJSON() {
 }
 
 // =====================================================
-// HTTP root endpoint
+// Dashboard root endpoint
 // =====================================================
 
 void handleRoot() {
 
-  String response =
-    "ESP32 Air Quality Monitor\n\n"
-    "JSON API:\n"
-    "/api/readings\n";
+  server.sendHeader(
+    "Cache-Control",
+    "no-store"
+  );
 
   server.send(
     200,
-    "text/plain",
-    response
+    "text/html",
+    DASHBOARD_HTML
   );
 }
 
@@ -242,10 +260,14 @@ void handleReadings() {
   String json =
     createSensorJSON();
 
-  // This will also help when we build the dashboard.
   server.sendHeader(
     "Access-Control-Allow-Origin",
     "*"
+  );
+
+  server.sendHeader(
+    "Cache-Control",
+    "no-store"
   );
 
   server.send(
@@ -261,23 +283,21 @@ void handleReadings() {
 
 void handleNotFound() {
 
-  String response =
-    "404 - Endpoint not found\n";
-
   server.send(
     404,
     "text/plain",
-    response
+    "404 - Endpoint not found\n"
   );
 }
 
 // =====================================================
-// Connect to WiFi
+// WiFi
 // =====================================================
 
 void setupWiFi() {
 
   Serial.println();
+
   Serial.print(
     "Connecting to WiFi: "
   );
@@ -299,9 +319,6 @@ void setupWiFi() {
   unsigned long startTime =
     millis();
 
-  // Give WiFi up to 10 seconds.
-  // Do not permanently freeze the monitoring system
-  // if networking fails.
   while (
     WiFi.status() != WL_CONNECTED &&
     millis() - startTime < 10000
@@ -343,7 +360,7 @@ void setupWiFi() {
 }
 
 // =====================================================
-// Configure HTTP API
+// HTTP server configuration
 // =====================================================
 
 void setupWebServer() {
@@ -357,18 +374,21 @@ void setupWebServer() {
     return;
   }
 
+  // Dashboard
   server.on(
     "/",
     HTTP_GET,
     handleRoot
   );
 
+  // JSON API
   server.on(
     "/api/readings",
     HTTP_GET,
     handleReadings
   );
 
+  // Unknown paths
   server.onNotFound(
     handleNotFound
   );
@@ -380,12 +400,16 @@ void setupWebServer() {
   );
 
   Serial.println(
+    "Dashboard: /"
+  );
+
+  Serial.println(
     "API endpoint: /api/readings"
   );
 }
 
 // =====================================================
-// Read PMS5003 UART data
+// Read PMS5003 data
 // =====================================================
 
 void readPMS5003() {
@@ -436,14 +460,14 @@ void readPMS5003() {
     }
 
     // -------------------------------------------------
-    // Store remaining packet bytes
+    // Store remaining bytes
     // -------------------------------------------------
 
     pmsFrame[pmsIndex++] =
       incomingByte;
 
     // -------------------------------------------------
-    // Full packet received
+    // Full packet
     // -------------------------------------------------
 
     if (
@@ -468,7 +492,7 @@ void readPMS5003() {
         pmsFrame[31];
 
       // -----------------------------------------------
-      // Valid packet
+      // Valid checksum
       // -----------------------------------------------
 
       if (
@@ -494,6 +518,7 @@ void readPMS5003() {
           millis();
 
         Serial.println();
+
         Serial.println(
           "----- PARTICULATE DATA -----"
         );
@@ -502,7 +527,9 @@ void readPMS5003() {
           "PM1.0: "
         );
 
-        Serial.print(pm1);
+        Serial.print(
+          pm1
+        );
 
         Serial.println(
           " ug/m3"
@@ -512,7 +539,9 @@ void readPMS5003() {
           "PM2.5: "
         );
 
-        Serial.print(pm25);
+        Serial.print(
+          pm25
+        );
 
         Serial.println(
           " ug/m3"
@@ -522,7 +551,9 @@ void readPMS5003() {
           "PM10:  "
         );
 
-        Serial.print(pm10);
+        Serial.print(
+          pm10
+        );
 
         Serial.println(
           " ug/m3"
@@ -539,6 +570,7 @@ void readPMS5003() {
       } else {
 
         Serial.println();
+
         Serial.println(
           "ERROR: PMS5003 checksum failed"
         );
@@ -550,7 +582,7 @@ void readPMS5003() {
 }
 
 // =====================================================
-// Check PMS5003 timeout
+// PMS5003 timeout detection
 // =====================================================
 
 void checkPMSHealth() {
@@ -567,6 +599,7 @@ void checkPMSHealth() {
     pmsHealthy = false;
 
     Serial.println();
+
     Serial.println(
       "WARNING: PMS5003 communication timeout"
     );
@@ -574,7 +607,7 @@ void checkPMSHealth() {
 }
 
 // =====================================================
-// Read DHT22 and BMP180
+// Environmental sensors
 // =====================================================
 
 void updateEnvironment() {
@@ -630,10 +663,11 @@ void updateEnvironment() {
   }
 
   // ---------------------------------------------------
-  // Serial output
+  // Terminal output
   // ---------------------------------------------------
 
   Serial.println();
+
   Serial.println(
     "----- ENVIRONMENT -----"
   );
@@ -721,7 +755,7 @@ void updateEnvironment() {
 }
 
 // =====================================================
-// Environmental OLED screen
+// Environmental OLED page
 // =====================================================
 
 void displayEnvironmentScreen() {
@@ -812,7 +846,7 @@ void displayEnvironmentScreen() {
 }
 
 // =====================================================
-// Air-quality OLED screen
+// Air quality OLED page
 // =====================================================
 
 void displayAirQualityScreen() {
@@ -844,7 +878,9 @@ void displayAirQualityScreen() {
       "PM1.0: "
     );
 
-    display.print(pm1);
+    display.print(
+      pm1
+    );
 
     display.println(
       " ug/m3"
@@ -854,7 +890,9 @@ void displayAirQualityScreen() {
       "PM2.5: "
     );
 
-    display.print(pm25);
+    display.print(
+      pm25
+    );
 
     display.println(
       " ug/m3"
@@ -864,7 +902,9 @@ void displayAirQualityScreen() {
       "PM10:  "
     );
 
-    display.print(pm10);
+    display.print(
+      pm10
+    );
 
     display.println(
       " ug/m3"
@@ -887,7 +927,7 @@ void displayAirQualityScreen() {
 }
 
 // =====================================================
-// OLED display manager
+// OLED manager
 // =====================================================
 
 void updateDisplay() {
@@ -910,7 +950,9 @@ void updateDisplay() {
 
 void setup() {
 
-  Serial.begin(115200);
+  Serial.begin(
+    115200
+  );
 
   Serial.println();
 
@@ -1038,7 +1080,7 @@ void setup() {
   delay(1000);
 
   // ---------------------------------------------------
-  // Initial environmental readings
+  // Initial environmental update
   // ---------------------------------------------------
 
   updateEnvironment();
@@ -1055,10 +1097,14 @@ void setup() {
     millis();
 
   // ---------------------------------------------------
-  // WiFi + HTTP
+  // WiFi
   // ---------------------------------------------------
 
   setupWiFi();
+
+  // ---------------------------------------------------
+  // HTTP server
+  // ---------------------------------------------------
 
   setupWebServer();
 
@@ -1076,7 +1122,7 @@ void setup() {
 void loop() {
 
   // ---------------------------------------------------
-  // Continuously service PMS5003
+  // PMS5003
   // ---------------------------------------------------
 
   readPMS5003();
@@ -1084,7 +1130,7 @@ void loop() {
   checkPMSHealth();
 
   // ---------------------------------------------------
-  // Continuously service HTTP clients
+  // HTTP requests
   // ---------------------------------------------------
 
   if (wifiHealthy) {

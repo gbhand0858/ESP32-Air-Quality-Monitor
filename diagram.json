@@ -38,6 +38,17 @@
       "attrs": {
         "i2cAddress": "0x3c"
       }
+    },
+    {
+      "type": "chip-pms5003",
+      "id": "pms1",
+      "top": -170,
+      "left": 190,
+      "attrs": {
+        "pm1": "10",
+        "pm25": "25",
+        "pm10": "40"
+      }
     }
   ],
   "connections": [
@@ -53,6 +64,7 @@
       "",
       []
     ],
+
     [
       "dht1:VCC",
       "esp:3V3",
@@ -71,6 +83,7 @@
       "black",
       []
     ],
+
     [
       "bmp1:VCC",
       "esp:3V3",
@@ -95,6 +108,7 @@
       "yellow",
       []
     ],
+
     [
       "oled1:VCC",
       "esp:3V3",
@@ -117,6 +131,31 @@
       "oled1:SCL",
       "esp:D22",
       "yellow",
+      []
+    ],
+
+    [
+      "pms1:VCC",
+      "esp:3V3",
+      "red",
+      []
+    ],
+    [
+      "pms1:GND",
+      "esp:GND.1",
+      "black",
+      []
+    ],
+    [
+      "pms1:TX",
+      "esp:RX2",
+      "purple",
+      []
+    ],
+    [
+      "pms1:RX",
+      "esp:TX2",
+      "orange",
       []
     ]
   ],

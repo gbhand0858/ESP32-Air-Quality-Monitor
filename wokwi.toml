@@ -2,3 +2,7 @@
 version = 1
 firmware = '.pio/build/esp32dev/firmware.bin'
 elf = '.pio/build/esp32dev/firmware.elf'
+
+[[chip]]
+name = 'pms5003'
+binary = 'chips/pms5003/pms5003.chip.wasm'
